@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ParkEase - Campus Parking Made Easy</title>
+    <meta name="description" content="Guaranteed parking subscription service connecting students with private driveways and business lots near campus">
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+    <div id="root"></div>
+    
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // Database Manager - Uses browser's IndexedDB for persistent storage
+        const DatabaseManager = {
+          dbName: 'ParkEaseDB',
+          version: 1,
+          db: null,
+
+          // Initialize database
+          init: async function() {
+            return new Promise((resolve, reject) => {
+              const request = indexedDB.open(this.dbName, this.version);
+
+              request.onerror = () => reject(request.error);
+              request.onsuccess = () => {
+                this.db = request.result;
+                resolve(this.db);
+              };
+
+              request.onupgradeneeded = (event) => {
+                const db = event.target.result;
+
+                // Create users store
+                if (!db.objectStoreNames.contains('users')) {
+                  const userStore = db.createObjectStore('users', { keyPath: 'email' });
+                  userStore.createIndex('email', 'email', { unique: true });
+                }
+
+                // Create bookings store
+                if (!db.objectStoreNames.contains('bookings')) {
+                  const bookingStore = db.createObjectStore('bookings', { keyPath: 'id', autoIncrement: true });
+                  bookingStore.createIndex('userEmail', 'userEmail', { unique: false });
+                }
+
+                // Create spaces store (for owners listing spaces)
+                if (!db.objectStoreNames.contains('spaces')) {
+                  const spaceStore = db.createObjectStore('spaces', { keyPath: 'id', autoIncrement: true });
+                  spaceStore.createIndex('ownerEmail', 'ownerEmail', { unique: false });
+                }
+              };
+            });
+          },
+
+          // User operations
+          createUser: async function(userData) {
+            const transaction = this.db.transaction(['users'], 'readwrite');
+            const store = transaction.objectStore('users');
+            return new Promise((resolve, reject) => {
+              const request = store.add(userData);
+              request.onsuccess = () => resolve(userData);
+              request.onerror = () => reject(request.error);
+            });
+          },
+
+          getUser: async function(email) {
+            const transaction = this.db.transaction(['users'], 'readonly');
+            const store = transaction.objectStore('users');
+            return new Promise((resolve, reject) => {
+              const request = store.get(email);
+              request.onsuccess = () => resolve(request.result);
+              request.onerror = () => reject(request.error);
+            });
+          },
+
+          loginUser: async function(email, password) {
+            const user = await this.getUser(email);
+            if (user && user.password === password) {
+              return { success: true, user };
+            }
+            return { success: false, message: 'Invalid email or password' };
+          },
+
+          // Booking operations
+          createBooking: async function(bookingData) {
+            const transaction = this.db.transaction(['bookings'], 'readwrite');
+            const store = transaction.objectStore('bookings');
+            return new Promise((resolve, reject) => {
+              const request = store.add(bookingData);
+              request.onsuccess = () => resolve({ ...bookingData, id: request.result });
+              request.onerror = () => reject(request.error);
+            });
+          },
+
+          getUserBookings: async function(userEmail) {
+            const transaction = this.db.transaction(['bookings'], 'readonly');
+            const store = transaction.objectStore('bookings');
+            const index = store.index('userEmail');
+            return new Promise((resolve, reject) => {
+              const request = index.getAll(userEmail);
+              request.onsuccess = () => resolve(request.result);
+              request.onerror = () => reject(request.error);
+            });
+          },
+
+          deleteBooking: async function(bookingId) {
+            const transaction = this.db.transaction(['bookings'], 'readwrite');
+            const store = transaction.objectStore('bookings');
+            return new Promise((resolve, reject) => {
+              const request = store.delete(bookingId);
+              request.onsuccess = () => resolve(true);
+              request.onerror = () => reject(request.error);
+            });
+          },
+
+          // Space operations
+          createSpace: async function(spaceData) {
+            const transaction = this.db.transaction(['spaces'], 'readwrite');
+            const store = transaction.objectStore('spaces');
+            return new Promise((resolve, reject) => {
+              const request = store.add(spaceData);
+              request.onsuccess = () => resolve({ ...spaceData, id: request.result });
+              request.onerror = () => reject(request.error);
+            });
+          },
+
+          getOwnerSpaces: async function(ownerEmail) {
+            const transaction = this.db.transaction(['spaces'], 'readonly');
+            const store = transaction.objectStore('spaces');
+            const index = store.index('ownerEmail');
+            return new Promise((resolve, reject) => {
+              const request = index.getAll(ownerEmail);
+              request.onsuccess = () => resolve(request.result);
+              request.onerror = () => reject(request.error);
+            });
+          }
+        };
+
+        const ParkingApp = () => {
+          const [currentView, setCurrentView] = useState('home');
+          const [currentUser, setCurrentUser] = useState(null);
+          const [userType, setUserType] = useState(null);
+          const [selectedSpace, setSelectedSpace] = useState(null);
+          const [bookingType, setBookingType] = useState('monthly');
+          const [searchQuery, setSearchQuery] = useState('');
+          const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+          const [dbReady, setDbReady] = useState(false);
+
+          const parkingSpaces = [
+            {
+              id: 1,
+              name: "Cozy Driveway Near Engineering",
+              type: "driveway",
+              address: "123 University Ave",
+              distance: "0.2 miles from campus",
+              dailyPrice: 8,
+              monthlyPrice: 150,
+              rating: 4.9,
+              reviews: 47,
+              features: ["Covered", "Well-lit", "24/7 Access"],
+              image: "🏠"
+            },
+            {
+              id: 2,
+              name: "Downtown Coffee Shop Lot",
+              type: "business",
+              address: "456 Main Street",
+              distance: "0.5 miles from campus",
+              dailyPrice: 10,
+              monthlyPrice: 180,
+              rating: 4.7,
+              reviews: 32,
+              features: ["Secure", "Well-lit", "Weekday Access"],
+              image: "☕"
+            },
+            {
+              id: 3,
+              name: "Private Garage - Library Area",
+              type: "driveway",
+              address: "789 College Blvd",
+              distance: "0.3 miles from campus",
+              dailyPrice: 12,
+              monthlyPrice: 200,
+              rating: 5.0,
+              reviews: 28,
+              features: ["Covered", "Secure", "24/7 Access"],
+              image: "🏘️"
+            },
+            {
+              id: 4,
+              name: "Student Housing Complex",
+              type: "business",
+              address: "321 Campus Dr",
+              distance: "0.1 miles from campus",
+              dailyPrice: 6,
+              monthlyPrice: 120,
+              rating: 4.6,
+              reviews: 53,
+              features: ["Outdoor", "Well-lit", "Security Camera"],
+              image: "🏢"
+            }
+          ];
+
+          const [userBookings, setUserBookings] = useState([]);
+          const [ownerSpaces, setOwnerSpaces] = useState([]);
+
+          // Initialize database on component mount
+          useEffect(() => {
+            DatabaseManager.init()
+              .then(() => {
+                setDbReady(true);
+                console.log('Database initialized successfully');
+              })
+              .catch(error => {
+                console.error('Database initialization failed:', error);
+              });
+          }, []);
+
+          // Load user's bookings when user logs in
+          useEffect(() => {
+            if (currentUser && dbReady) {
+              loadUserData();
+            }
+          }, [currentUser, dbReady]);
+
+          const loadUserData = async () => {
+            if (!currentUser) return;
+            
+            try {
+              const bookings = await DatabaseManager.getUserBookings(currentUser.email);
+              setUserBookings(bookings);
+
+              if (currentUser.userType === 'owner') {
+                const spaces = await DatabaseManager.getOwnerSpaces(currentUser.email);
+                setOwnerSpaces(spaces);
+              }
+            } catch (error) {
+              console.error('Error loading user data:', error);
+            }
+          };
+
+          const handleLogout = () => {
+            setCurrentUser(null);
+            setUserType(null);
+            setUserBookings([]);
+            setOwnerSpaces([]);
+            setCurrentView('home');
+          };
+
+          const Header = () => (
+            <header className="bg-blue-600 text-white shadow-lg">
+              <div className="max-w-7xl mx-auto px-4 py-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2 cursor-pointer" onClick={() => setCurrentView('home')}>
+                    <span className="text-3xl">🚗</span>
+                    <span className="text-2xl font-bold">ParkEase</span>
+                  </div>
+                  
+                  <nav className="hidden md:flex space-x-6">
+                    <button onClick={() => setCurrentView('browse')} className="hover:text-blue-200 transition">Find Parking</button>
+                    <button onClick={() => setCurrentView('list-space')} className="hover:text-blue-200 transition">List Your Space</button>
+                    <button onClick={() => setCurrentView('how-it-works')} className="hover:text-blue-200 transition">How It Works</button>
+                  </nav>
+
+                  <div className="hidden md:flex space-x-4">
+                    {!currentUser ? (
+                      <>
+                        <button onClick={() => setCurrentView('login')} className="px-4 py-2 rounded-lg hover:bg-blue-700 transition">Login</button>
+                        <button onClick={() => setCurrentView('signup')} className="px-4 py-2 bg-white text-blue-600 rounded-lg hover:bg-blue-50 transition font-semibold">Sign Up</button>
+                      </>
+                    ) : (
+                      <div className="flex items-center space-x-4">
+                        <span className="text-sm">Hello, {currentUser.name}</span>
+                        <button onClick={() => setCurrentView('dashboard')} className="px-4 py-2 bg-white text-blue-600 rounded-lg hover:bg-blue-50 transition font-semibold">
+                          👤 Dashboard
+                        </button>
+                        <button onClick={handleLogout} className="px-4 py-2 rounded-lg hover:bg-blue-700 transition">Logout</button>
+                      </div>
+                    )}
+                  </div>
+
+                  <button className="md:hidden text-2xl" onClick={() => setMobileMenuOpen(!mobileMenuOpen)}>
+                    {mobileMenuOpen ? '✕' : '☰'}
+                  </button>
+                </div>
+
+                {mobileMenuOpen && (
+                  <div className="md:hidden mt-4 pb-4 space-y-2">
+                    <button onClick={() => {setCurrentView('browse'); setMobileMenuOpen(false);}} className="block w-full text-left py-2 hover:text-blue-200">Find Parking</button>
+                    <button onClick={() => {setCurrentView('list-space'); setMobileMenuOpen(false);}} className="block w-full text-left py-2 hover:text-blue-200">List Your Space</button>
+                    <button onClick={() => {setCurrentView('how-it-works'); setMobileMenuOpen(false);}} className="block w-full text-left py-2 hover:text-blue-200">How It Works</button>
+                    {!currentUser ? (
+                      <>
+                        <button onClick={() => {setCurrentView('login'); setMobileMenuOpen(false);}} className="block w-full text-left py-2 hover:text-blue-200">Login</button>
+                        <button onClick={() => {setCurrentView('signup'); setMobileMenuOpen(false);}} className="block w-full text-left py-2 bg-white text-blue-600 rounded-lg px-4 mt-2">Sign Up</button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={() => {setCurrentView('dashboard'); setMobileMenuOpen(false);}} className="block w-full text-left py-2 bg-white text-blue-600 rounded-lg px-4 mt-2">Dashboard</button>
+                        <button onClick={() => {handleLogout(); setMobileMenuOpen(false);}} className="block w-full text-left py-2 hover:text-blue-200">Logout</button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            </header>
+          );
+
+          const HomePage = () => (
+            <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white">
+              <div className="max-w-7xl mx-auto px-4 py-16">
+                <div className="text-center mb-16">
+                  <h1 className="text-5xl font-bold text-gray-900 mb-6">
+                    Guaranteed Parking for Campus Life
+                  </h1>
+                  <p className="text-xl text-gray-600 mb-8 max-w-3xl mx-auto">
+                    Connect with private driveways and small business lots near campus. Say goodbye to circling for spots and hello to guaranteed, convenient parking.
+                  </p>
+                  <div className="flex flex-col sm:flex-row gap-4 justify-center">
+                    <button onClick={() => setCurrentView('browse')} className="px-8 py-4 bg-blue-600 text-white rounded-lg text-lg font-semibold hover:bg-blue-700 transition">
+                      🔍 Find Parking
+                    </button>
+                    <button onClick={() => setCurrentView('list-space')} className="px-8 py-4 bg-white border-2 border-blue-600 text-blue-600 rounded-lg text-lg font-semibold hover:bg-blue-50 transition">
+                      🏠 List Your Space
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid md:grid-cols-3 gap-8 mb-16">
+                  <div className="bg-white p-8 rounded-xl shadow-lg text-center">
+                    <div className="text-5xl mb-4">🛡️</div>
+                    <h3 className="text-xl font-bold mb-3">Guaranteed Availability</h3>
+                    <p className="text-gray-600">Your spot is always reserved. No more uncertainty or stress about finding parking.</p>
+                  </div>
+                  <div className="bg-white p-8 rounded-xl shadow-lg text-center">
+                    <div className="text-5xl mb-4">💰</div>
+                    <h3 className="text-xl font-bold mb-3">Save Money</h3>
+                    <p className="text-gray-600">Private spaces cost less than campus lots while offering more convenience.</p>
+                  </div>
+                  <div className="bg-white p-8 rounded-xl shadow-lg text-center">
+                    <div className="text-5xl mb-4">📍</div>
+                    <h3 className="text-xl font-bold mb-3">Prime Locations</h3>
+                    <p className="text-gray-600">Park within walking distance of your classes, library, or favorite campus spots.</p>
+                  </div>
+                </div>
+
+                <div className="bg-blue-600 text-white rounded-2xl p-12 text-center">
+                  <h2 className="text-3xl font-bold mb-4">Join 1,500+ Happy Campus Parkers</h2>
+                  <p className="text-xl mb-8">Flexible daily or monthly plans available</p>
+                  <button onClick={() => setCurrentView('signup')} className="px-8 py-4 bg-white text-blue-600 rounded-lg text-lg font-semibold hover:bg-blue-50 transition">
+                    Get Started Today
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+
+          const BrowseSpaces = () => (
+            <div className="min-h-screen bg-gray-50 py-8">
+              <div className="max-w-7xl mx-auto px-4">
+                <div className="mb-8">
+                  <h1 className="text-4xl font-bold text-gray-900 mb-4">Find Your Perfect Parking Spot</h1>
+                  <div className="flex flex-col md:flex-row gap-4">
+                    <div className="flex-1 relative">
+                      <input
+                        type="text"
+                        placeholder="Search by location or address..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button className={`px-6 py-3 rounded-lg font-semibold transition ${bookingType === 'daily' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 border border-gray-300'}`} onClick={() => setBookingType('daily')}>
+                        Daily
+                      </button>
+                      <button className={`px-6 py-3 rounded-lg font-semibold transition ${bookingType === 'monthly' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 border border-gray-300'}`} onClick={() => setBookingType('monthly')}>
+                        Monthly
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {parkingSpaces.map(space => (
+                    <div key={space.id} className="bg-white rounded-xl shadow-lg overflow-hidden hover:shadow-xl transition cursor-pointer" onClick={() => {setSelectedSpace(space); setCurrentView('space-detail');}}>
+                      <div className="bg-gradient-to-br from-blue-400 to-blue-600 h-48 flex items-center justify-center text-6xl">
+                        {space.image}
+                      </div>
+                      <div className="p-6">
+                        <div className="flex items-start justify-between mb-2">
+                          <h3 className="text-xl font-bold text-gray-900">{space.name}</h3>
+                          <div className="flex items-center space-x-1 bg-yellow-100 px-2 py-1 rounded">
+                            <span className="text-lg">⭐</span>
+                            <span className="text-sm font-semibold text-yellow-900">{space.rating}</span>
+                          </div>
+                        </div>
+                        <div className="text-gray-600 mb-3">
+                          <span className="text-sm">📍 {space.distance}</span>
+                        </div>
+                        <div className="flex flex-wrap gap-2 mb-4">
+                          {space.features.map((feature, idx) => (
+                            <span key={idx} className="px-3 py-1 bg-blue-50 text-blue-700 text-xs rounded-full font-medium">
+                              {feature}
+                            </span>
+                          ))}
+                        </div>
+                        <div className="flex items-center justify-between pt-4 border-t border-gray-200">
+                          <div>
+                            <span className="text-2xl font-bold text-gray-900">
+                              ${bookingType === 'daily' ? space.dailyPrice : space.monthlyPrice}
+                            </span>
+                            <span className="text-gray-600 ml-1">/{bookingType === 'daily' ? 'day' : 'mo'}</span>
+                          </div>
+                          <button className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
+                            View ›
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          );
+
+          const SpaceDetail = () => (
+            <div className="min-h-screen bg-gray-50 py-8">
+              <div className="max-w-4xl mx-auto px-4">
+                <button onClick={() => setCurrentView('browse')} className="mb-6 text-blue-600 hover:text-blue-700">
+                  ‹ Back to search
+                </button>
+
+                <div className="bg-white rounded-xl shadow-lg overflow-hidden">
+                  <div className="bg-gradient-to-br from-blue-400 to-blue-600 h-96 flex items-center justify-center text-9xl">
+                    {selectedSpace.image}
+                  </div>
+                  
+                  <div className="p-8">
+                    <div className="mb-6">
+                      <h1 className="text-3xl font-bold text-gray-900 mb-2">{selectedSpace.name}</h1>
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:space-x-4 text-gray-600 space-y-1 sm:space-y-0">
+                        <span>📍 {selectedSpace.address}</span>
+                        <span>⭐ {selectedSpace.rating} ({selectedSpace.reviews} reviews)</span>
+                      </div>
+                    </div>
+
+                    <div className="grid md:grid-cols-3 gap-4 mb-8">
+                      {selectedSpace.features.map((feature, idx) => (
+                        <div key={idx} className="flex items-center space-x-2 bg-blue-50 p-3 rounded-lg">
+                          <span className="text-xl">🛡️</span>
+                          <span className="font-medium text-gray-900">{feature}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="border-t border-gray-200 pt-6 mb-6">
+                      <h2 className="text-xl font-bold mb-4">Choose Your Plan</h2>
+                      <div className="grid md:grid-cols-2 gap-4">
+                        <div className={`border-2 rounded-lg p-6 cursor-pointer transition ${bookingType === 'daily' ? 'border-blue-600 bg-blue-50' : 'border-gray-200 hover:border-blue-300'}`} onClick={() => setBookingType('daily')}>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-bold text-lg">Daily Pass</span>
+                            <span className="text-xl">⏰</span>
+                          </div>
+                          <div className="text-3xl font-bold text-gray-900 mb-2">${selectedSpace.dailyPrice}</div>
+                          <p className="text-gray-600 text-sm">Perfect for occasional parking needs</p>
+                        </div>
+                        <div className={`border-2 rounded-lg p-6 cursor-pointer transition ${bookingType === 'monthly' ? 'border-blue-600 bg-blue-50' : 'border-gray-200 hover:border-blue-300'}`} onClick={() => setBookingType('monthly')}>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-bold text-lg">Monthly Pass</span>
+                            <span className="text-xl">📅</span>
+                          </div>
+                          <div className="text-3xl font-bold text-gray-900 mb-2">${selectedSpace.monthlyPrice}</div>
+                          <p className="text-gray-600 text-sm">Best value for regular parkers</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <button onClick={() => {
+                      if (!currentUser) {
+                        setCurrentView('login');
+                      } else {
+                        const bookingData = {
+                          ...selectedSpace,
+                          bookingType,
+                          bookingDate: new Date().toLocaleDateString(),
+                          userEmail: currentUser.email
+                        };
+                        DatabaseManager.createBooking(bookingData)
+                          .then(() => {
+                            loadUserData();
+                            setCurrentView('confirmation');
+                          })
+                          .catch(error => {
+                            console.error('Booking failed:', error);
+                            alert('Booking failed. Please try again.');
+                          });
+                      }
+                    }} className="w-full py-4 bg-blue-600 text-white rounded-lg text-lg font-semibold hover:bg-blue-700 transition">
+                      Reserve This Spot
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+
+          const Confirmation = () => (
+            <div className="min-h-screen bg-gray-50 py-16">
+              <div className="max-w-2xl mx-auto px-4">
+                <div className="bg-white rounded-xl shadow-lg p-8 text-center">
+                  <div className="text-6xl mb-6">✅</div>
+                  <h1 className="text-3xl font-bold text-gray-900 mb-4">Reservation Confirmed!</h1>
+                  <p className="text-xl text-gray-600 mb-8">Your parking spot is guaranteed and ready for you.</p>
+                  
+                  <div className="bg-gray-50 rounded-lg p-6 mb-8 text-left">
+                    <h2 className="font-bold text-lg mb-4">Booking Details</h2>
+                    <div className="space-y-3">
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Location:</span>
+                        <span className="font-semibold">{selectedSpace.name}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Plan:</span>
+                        <span className="font-semibold capitalize">{bookingType}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Price:</span>
+                        <span className="font-semibold text-blue-600">${bookingType === 'daily' ? selectedSpace.dailyPrice : selectedSpace.monthlyPrice}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row gap-4">
+                    <button onClick={() => setCurrentView('dashboard')} className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition">
+                      View Dashboard
+                    </button>
+                    <button onClick={() => setCurrentView('browse')} className="flex-1 px-6 py-3 border-2 border-gray-300 text-gray-700 rounded-lg font-semibold hover:bg-gray-50 transition">
+                      Find Another Spot
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+
+          const Dashboard = () => (
+            <div className="min-h-screen bg-gray-50 py-8">
+              <div className="max-w-7xl mx-auto px-4">
+                <h1 className="text-4xl font-bold text-gray-900 mb-8">My Dashboard</h1>
+                
+                <div className="grid md:grid-cols-3 gap-6 mb-8">
+                  <div className="bg-white rounded-xl shadow p-6">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-gray-600 mb-1">Active Bookings</p>
+                        <p className="text-3xl font-bold text-gray-900">{userBookings.length}</p>
+                      </div>
+                      <span className="text-5xl">🚗</span>
+                    </div>
+                  </div>
+                  <div className="bg-white rounded-xl shadow p-6">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-gray-600 mb-1">Monthly Savings</p>
+                        <p className="text-3xl font-bold text-green-600">$87</p>
+                      </div>
+                      <span className="text-5xl">💰</span>
+                    </div>
+                  </div>
+                  <div className="bg-white rounded-xl shadow p-6">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-gray-600 mb-1">Member Since</p>
+                        <p className="text-xl font-bold text-gray-900">Nov 2024</p>
+                      </div>
+                      <span className="text-5xl">📅</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl shadow-lg overflow-hidden">
+                  <div className="p-6 border-b border-gray-200">
+                    <h2 className="text-2xl font-bold text-gray-900">My Parking Spots</h2>
+                  </div>
+                  <div className="p-6">
+                    {userBookings.length === 0 ? (
+                      <div className="text-center py-12">
+                        <span className="text-6xl block mb-4">🚗</span>
+                        <p className="text-gray-600 mb-4">No active bookings yet</p>
+                        <button onClick={() => setCurrentView('browse')} className="px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition">
+                          Find Parking
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        {userBookings.map((booking, idx) => (
+                          <div key={booking.id || idx} className="border border-gray-200 rounded-lg p-6 hover:shadow-md transition">
+                            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+                              <div className="flex-1">
+                                <h3 className="text-xl font-bold text-gray-900 mb-2">{booking.name}</h3>
+                                <div className="space-y-1 text-gray-600">
+                                  <div>📍 {booking.address}</div>
+                                  <div>📅 {booking.bookingType} Plan • Started {booking.bookingDate}</div>
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <div className="text-2xl font-bold text-blue-600 mb-2">
+                                  ${booking.bookingType === 'daily' ? booking.dailyPrice : booking.monthlyPrice}
+                                </div>
+                                <span className="inline-block px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-semibold mb-2">
+                                  Active
+                                </span>
+                                <button 
+                                  onClick={() => {
+                                    if (confirm('Are you sure you want to cancel this booking?')) {
+                                      DatabaseManager.deleteBooking(booking.id)
+                                        .then(() => loadUserData())
+                                        .catch(error => console.error('Delete failed:', error));
+                                    }
+                                  }}
+                                  className="block w-full px-3 py-1 bg-red-100 text-red-700 rounded text-sm font-semibold hover:bg-red-200 transition"
+                                >
+                                  Cancel Booking
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+
+          const ListSpace = () => {
+            const [formData, setFormData] = useState({
+              name: '',
+              address: '',
+              type: 'driveway',
+              dailyPrice: '',
+              monthlyPrice: '',
+              features: []
+            });
+
+            return (
+              <div className="min-h-screen bg-gray-50 py-8">
+                <div className="max-w-3xl mx-auto px-4">
+                  <div className="text-center mb-12">
+                    <h1 className="text-4xl font-bold text-gray-900 mb-4">List Your Parking Space</h1>
+                    <p className="text-xl text-gray-600">Turn your unused driveway or lot into a steady income stream</p>
+                  </div>
+
+                  <div className="bg-white rounded-xl shadow-lg p-8">
+                    <div className="space-y-6">
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">Space Name</label>
+                        <input
+                          type="text"
+                          value={formData.name}
+                          onChange={(e) => setFormData({...formData, name: e.target.value})}
+                          placeholder="e.g., Cozy Driveway Near Campus"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">Address</label>
+                        <input
+                          type="text"
+                          value={formData.address}
+                          onChange={(e) => setFormData({...formData, address: e.target.value})}
+                          placeholder="123 University Ave"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">Space Type</label>
+                        <select
+                          value={formData.type}
+                          onChange={(e) => setFormData({...formData, type: e.target.value})}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        >
+                          <option value="driveway">Private Driveway</option>
+                          <option value="business">Business Lot</option>
+                          <option value="garage">Garage</option>
+                        </select>
+                      </div>
+
+                      <div className="grid md:grid-cols-2 gap-6">
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-700 mb-2">Daily Price ($)</label>
+                          <input
+                            type="number"
+                            value={formData.dailyPrice}
+                            onChange={(e) => setFormData({...formData, dailyPrice: e.target.value})}
+                            placeholder="8"
+                            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-semibold text-gray-700 mb-2">Monthly Price ($)</label>
+                          <input
+                            type="number"
+                            value={formData.monthlyPrice}
+                            onChange={(e) => setFormData({...formData, monthlyPrice: e.target.value})}
+                            placeholder="150"
+                            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          />
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={async () => {
+                          if (!currentUser) {
+                            alert('Please login first');
+                            setCurrentView('login');
+                          } else if (!formData.name || !formData.address || !formData.dailyPrice || !formData.monthlyPrice) {
+                            alert('Please fill in all fields');
+                          } else {
+                            try {
+                              const spaceData = {
+                                ...formData,
+                                ownerEmail: currentUser.email,
+                                rating: 0,
+                                reviews: 0,
+                                features: ['Well-lit', '24/7 Access'],
+                                image: formData.type === 'driveway' ? '🏠' : '🏢',
+                                distance: '0.5 miles from campus'
+                              };
+                              await DatabaseManager.createSpace(spaceData);
+                              await loadUserData();
+                              alert('Space listed successfully!');
+                              setCurrentView('dashboard');
+                            } catch (error) {
+                              console.error('Failed to list space:', error);
+                              alert('Failed to list space. Please try again.');
+                            }
+                          }
+                        }}
+                        className="w-full py-4 bg-blue-600 text-white rounded-lg text-lg font-semibold hover:bg-blue-700 transition"
+                      >
+                        List My Space
+                      </button>
+                    </div>
+
+                    <div className="mt-8 p-6 bg-blue-50 rounded-lg">
+                      <h3 className="font-bold text-lg mb-2">Why List With Us?</h3>
+                      <ul className="space-y-2 text-gray-700">
+                        <li>• Earn passive income from your unused space</li>
+                        <li>• We handle payments and customer service</li>
+                        <li>• You control availability and pricing</li>
+                        <li>• Join 500+ space owners in our network</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          };
+
+          const HowItWorks = () => (
+            <div className="min-h-screen bg-gray-50 py-16">
+              <div className="max-w-6xl mx-auto px-4">
+                <div className="text-center mb-16">
+                  <h1 className="text-4xl font-bold text-gray-900 mb-4">How ParkEase Works</h1>
+                  <p className="text-xl text-gray-600">Simple, convenient parking in three easy steps</p>
+                </div>
+
+                <div className="grid md:grid-cols-3 gap-8 mb-16">
+                  <div className="text-center">
+                    <div className="bg-blue-600 text-white w-16 h-16 rounded-full flex items-center justify-center text-2xl font-bold mx-auto mb-4">1</div>
+                    <h3 className="text-xl font-bold mb-3">Search & Compare</h3>
+                    <p className="text-gray-600">Browse available parking spaces near your campus. Filter by price, distance, and amenities.</p>
+                  </div>
+                  <div className="text-center">
+                    <div className="bg-blue-600 text-white w-16 h-16 rounded-full flex items-center justify-center text-2xl font-bold mx-auto mb-4">2</div>
+                    <h3 className="text-xl font-bold mb-3">Reserve Your Spot</h3>
+                    <p className="text-gray-600">Choose daily or monthly plans. Your spot is guaranteed and always available when you need it.</p>
+                  </div>
+                  <div className="text-center">
+                    <div className="bg-blue-600 text-white w-16 h-16 rounded-full flex items-center justify-center text-2xl font-bold mx-auto mb-4">3</div>
+                    <h3 className="text-xl font-bold mb-3">Park with Confidence</h3>
+                    <p className="text-gray-600">Get directions and access details. Enjoy stress-free parking all semester long.</p>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl shadow-lg p-8">
+                  <h2 className="text-2xl font-bold mb-6">Frequently Asked Questions</h2>
+                  <div className="space-y-6">
+                    <div>
+                      <h4 className="font-bold text-lg mb-2">Is my parking spot really guaranteed?</h4>
+                      <p className="text-gray-600">Yes! Once you reserve a spot, it's yours for the duration of your plan. No one else can book it.</p>
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-lg mb-2">Can I cancel my monthly subscription?</h4>
+                      <p className="text-gray-600">Yes, you can cancel anytime with 7 days notice. Daily passes are non-refundable once confirmed.</p>
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-lg mb-2">What if I have issues with my parking space?</h4>
+                      <p className="text-gray-600">Contact our support team 24/7. We'll resolve any issues quickly or help you find an alternative spot.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+
+          const Login = () => {
+            const [formData, setFormData] = useState({ email: '', password: '' });
+            const [error, setError] = useState('');
+
+            const handleLogin = async (e) => {
+              e.preventDefault();
+              setError('');
+
+              if (!formData.email || !formData.password) {
+                setError('Please fill in all fields');
+                return;
+              }
+
+              try {
+                const result = await DatabaseManager.loginUser(formData.email, formData.password);
+                if (result.success) {
+                  setCurrentUser(result.user);
+                  setUserType(result.user.userType);
+                  setCurrentView('dashboard');
+                } else {
+                  setError(result.message);
+                }
+              } catch (error) {
+                console.error('Login error:', error);
+                setError('Login failed. Please try again.');
+              }
+            };
+
+            return (
+              <div className="min-h-screen bg-gray-50 py-16">
+                <div className="max-w-md mx-auto px-4">
+                  <div className="bg-white rounded-xl shadow-lg p-8">
+                    <h1 className="text-3xl font-bold text-gray-900 mb-6 text-center">Welcome Back</h1>
+                    {error && (
+                      <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
+                        {error}
+                      </div>
+                    )}
+                    <form onSubmit={handleLogin} className="space-y-4">
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">Email</label>
+                        <input
+                          type="email"
+                          value={formData.email}
+                          onChange={(e) => setFormData({...formData, email: e.target.value})}
+                          placeholder="your@email.com"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">Password</label>
+                        <input
+                          type="password"
+                          value={formData.password}
+                          onChange={(e) => setFormData({...formData, password: e.target.value})}
+                          placeholder="••••••••"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        className="w-full py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition"
+                      >
+                        Sign In
+                      </button>
+                    </form>
+                    <p className="text-center text-gray-600 mt-6">
+                      Don't have an account?{' '}
+                      <button onClick={() => setCurrentView('signup')} className="text-blue-600 font-semibold hover:text-blue-700">
+                        Sign Up
+                      </button>
+                    </p>
+                  </div>
+                </div>
+              </div>
+            );
+          };
+
+          const SignUp = () => {
+            const [formData, setFormData] = useState({
+              name: '',
+              email: '',
+              password: '',
+              userType: 'parker'
+            });
+            const [error, setError] = useState('');
+
+            const handleSignup = async (e) => {
+              e.preventDefault();
+              setError('');
+
+              if (!formData.name || !formData.email || !formData.password) {
+                setError('Please fill in all fields');
+                return;
+              }
+
+              if (formData.password.length < 6) {
+                setError('Password must be at least 6 characters');
+                return;
+              }
+
+              try {
+                // Check if user already exists
+                const existingUser = await DatabaseManager.getUser(formData.email);
+                if (existingUser) {
+                  setError('An account with this email already exists');
+                  return;
+                }
+
+                // Create new user
+                const userData = {
+                  name: formData.name,
+                  email: formData.email,
+                  password: formData.password,
+                  userType: formData.userType,
+                  createdAt: new Date().toISOString()
+                };
+
+                await DatabaseManager.createUser(userData);
+                setCurrentUser(userData);
+                setUserType(userData.userType);
+                setCurrentView('dashboard');
+              } catch (error) {
+                console.error('Signup error:', error);
+                setError('Signup failed. Please try again.');
+              }
+            };
+
+            return (
+              <div className="min-h-screen bg-gray-50 py-16">
+                <div className="max-w-md mx-auto px-4">
+                  <div className="bg-white rounded-xl shadow-lg p-8">
+                    <h1 className="text-3xl font-bold text-gray-900 mb-6 text-center">Create Account</h1>
+                    {error && (
+                      <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
+                        {error}
+                      </div>
+                    )}
+                    <form onSubmit={handleSignup} className="space-y-4">
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">Full Name</label>
+                        <input
+                          type="text"
+                          value={formData.name}
+                          onChange={(e) => setFormData({...formData, name: e.target.value})}
+                          placeholder="John Doe"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">Email</label>
+                        <input
+                          type="email"
+                          value={formData.email}
+                          onChange={(e) => setFormData({...formData, email: e.target.value})}
+                          placeholder="your@email.com"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">Password</label>
+                        <input
+                          type="password"
+                          value={formData.password}
+                          onChange={(e) => setFormData({...formData, password: e.target.value})}
+                          placeholder="••••••••"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">Minimum 6 characters</p>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">I am a...</label>
+                        <select
+                          value={formData.userType}
+                          onChange={(e) => setFormData({...formData, userType: e.target.value})}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        >
+                          <option value="parker">Looking for Parking</option>
+                          <option value="owner">Space Owner</option>
+                        </select>
+                      </div>
+                      <button
+                        type="submit"
+                        className="w-full py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition"
+                      >
+                        Create Account
+                      </button>
+                    </form>
+                    <p className="text-center text-gray-600 mt-6">
+                      Already have an account?{' '}
+                      <button onClick={() => setCurrentView('login')} className="text-blue-600 font-semibold hover:text-blue-700">
+                        Sign In
+                      </button>
+                    </p>
+                  </div>
+                </div>
+              </div>
+            );
+          };
+
+          return (
+            <div className="min-h-screen bg-white">
+              <Header />
+              {currentView === 'home' && <HomePage />}
+              {currentView === 'browse' && <BrowseSpaces />}
+              {currentView === 'space-detail' && selectedSpace && <SpaceDetail />}
+              {currentView === 'confirmation' && <Confirmation />}
+              {currentView === 'dashboard' && <Dashboard />}
+              {currentView === 'list-space' && <ListSpace />}
+              {currentView === 'how-it-works' && <HowItWorks />}
+              {currentView === 'login' && <Login />}
+              {currentView === 'signup' && <SignUp />}
+            </div>
+          );
+        };
+
+        ReactDOM.render(<ParkingApp />, document.getElementById('root'));
+    </script>
+</body>
+</html>
